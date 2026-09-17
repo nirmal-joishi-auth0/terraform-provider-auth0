@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 
 	"github.com/auth0/terraform-provider-auth0/internal/config"
+	apierr "github.com/auth0/terraform-provider-auth0/internal/error"
 	internalValidation "github.com/auth0/terraform-provider-auth0/internal/validation"
 )
 
@@ -492,8 +493,22 @@ func readGuardian(ctx context.Context, data *schema.ResourceData, meta interface
 func updateGuardian(ctx context.Context, data *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	api := meta.(*config.Config).GetAPI()
 
+	var diags diag.Diagnostics
+
+	// Checked separately: go-multierror lacks Unwrap() []error, so errors.As
+	// cannot traverse into its wrapped errors and IsInsufficientEntitlement would never match.
+	if err := updatePolicy(ctx, data, api); err != nil {
+		if apierr.IsInsufficientEntitlement(err) {
+			diags = append(diags, apierr.EntitlementWarning(
+				"Guardian Adaptive MFA Policy (confidence-score)",
+				"the policy was not applied",
+			))
+		} else {
+			return diag.FromErr(err)
+		}
+	}
+
 	result := multierror.Append(
-		updatePolicy(ctx, data, api),
 		updateEmailFactor(ctx, data, api),
 		updateOTPFactor(ctx, data, api),
 		updateRecoveryCodeFactor(ctx, data, api),
@@ -504,10 +519,10 @@ func updateGuardian(ctx context.Context, data *schema.ResourceData, meta interfa
 		updatePush(ctx, data, api),
 	)
 	if err := result.ErrorOrNil(); err != nil {
-		return diag.FromErr(err)
+		return append(diags, diag.FromErr(err)...)
 	}
 
-	return readGuardian(ctx, data, meta)
+	return append(diags, readGuardian(ctx, data, meta)...)
 }
 
 func deleteGuardian(ctx context.Context, _ *schema.ResourceData, meta interface{}) diag.Diagnostics {
